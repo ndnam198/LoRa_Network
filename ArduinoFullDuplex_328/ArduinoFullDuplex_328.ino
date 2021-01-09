@@ -18,7 +18,7 @@
 #define SEND_TO_GW_FREQ (30000ul)
 #define RELAY_CHECK_PERIOD (30000ul)
 
-#define LIGHT_SENSOR_THRESHOLD (900ul)
+#define LIGHT_SENSOR_THRESHOLD (850ul)
 // #define PRINT_DEBUG
 #define DEBUG_LORA (0)
 #define DEBUG_NODE (1)
@@ -98,7 +98,7 @@ const nodeInfo_t this_node PROGMEM = {
 nodeInfo_t *const node_mem_ptr PROGMEM = (nodeInfo_t*)&this_node;
 nodeInfo_t *this_node_ptr = NULL;
 
-u32 control_type = 0;
+u32 target_state = 0;
 u32 receive_control_timestamp = 0;
 u8 relay_check_flag = FALSE;
 
@@ -264,7 +264,7 @@ void onReceive(int packetSize)
 {
   String message = "";
   char *temp_msg_ptr = NULL;
-u32 temp = 0;
+  u32 temp = 0;
   u16 temp_id = 0;
   u8 temp_pos = 0;
   u8 temp_state = 0;
@@ -278,13 +278,13 @@ u32 temp = 0;
   /* Cast from C++ String type to C char* type */
   temp_msg_ptr = (char *)(message.c_str());
 
-  /* Parse received msg data */
+  /* Phân tích dữ liệu chứa trong bản tin nhận được. Cụ thể nhận được dạng chuỗi -> dạng unsigned int 32 */
   temp = Node_ParseMsg(temp_msg_ptr);
   temp_id = Node_GetIdfromMsg(temp);
   temp_pos = Node_GetPositionFromMsg(temp);
   temp_state = Node_GetRelayStatusFromMsg(temp);
 
-  /* Get current relay status */
+  /* Nếu bản tin nhận được có dữ liệu node_ID khớp với node_ID của node này */
   if (temp_id == NODE_ID)
   {
     print_debug(DEBUG_LORA, "%s\r\n", "---------------- Matched ----------------");
@@ -298,9 +298,11 @@ u32 temp = 0;
       if (this_node_ptr->_relayState != e_relayOn)
       {
         relayControl(HIGH);
-        /* Setup check environment */
+        /* Bật cờ check đèn */
         relay_check_flag = TRUE;
-        control_type = RELAY_ON;
+        /* Xác định trạng thái đèn mục tiêu */
+        target_state = RELAY_ON;
+        /* Lấy mốc thời gian khi nhận được bản tin để bắt đầu quá trình kiểm tra đèn trong 30s */
         receive_control_timestamp = millis();
       }
       break;
@@ -308,15 +310,15 @@ u32 temp = 0;
       if (this_node_ptr->_relayState != e_relayOff)
       {
         relayControl(LOW);
-        /* Setup check environment */
         relay_check_flag = TRUE;
-        control_type = RELAY_OFF;
+        target_state = RELAY_OFF;
         receive_control_timestamp = millis();
       }
       break;
     default:
       break;
     }
+    /* Dữ liệu vị trí của node sẽ được update nếu giá trị nhận được khác 0xFF = 255 */
     if(temp_pos != 0xFF){
       this_node_ptr->_position = temp_pos;  
     }
@@ -325,6 +327,7 @@ u32 temp = 0;
     // LoRa_sendMessage(String(NODE_ID) + ".ACK");
   }
   else{
+    /* In ra màn hình ký tự "." nếu không khớp node_id */
     print_debug(DEBUG_LORA,"%s", ".");
   }
   message = "";
@@ -336,6 +339,7 @@ u32 temp = 0;
  */
 void onTxDone()
 {
+  /* Hàm này chạy khi dữ liệu được gửi qua LoRa thành công */
   print_debug(DEBUG_LORA, "%s", "Node Info sent\r\n");
   LoRa_rxMode();
 }
@@ -353,7 +357,7 @@ bool runEvery(unsigned long interval)
 }
 
 /**
- * @brief Return node to its previous condition before any kind of MCU_RESET
+ * @brief Lấy lại trạng thái cũ của node trước khi mất điện bao gồm: vị trí, trạng thái đèn
  * 
  */
 void Node_RetrieveOldState()
@@ -366,14 +370,14 @@ void Node_RetrieveOldState()
   case e_relayOn:
     relayControl(HIGH);
     /* Setup check environment */
-    control_type = RELAY_ON;
+    target_state = RELAY_ON;
     receive_control_timestamp = millis();
     relay_check_flag = TRUE;
     break;
   case e_relayOff:
     relayControl(LOW);
     /* Setup check environment */
-    control_type = RELAY_OFF;
+    target_state = RELAY_OFF;
     receive_control_timestamp = millis();
     relay_check_flag = TRUE;
     break;
@@ -400,18 +404,22 @@ void setup()
     while (1)
       ;
   }
+
+  /* Khởi tạo LoRa */
   LoRa_Init();
 
   pinMode(LED_DEBUG, OUTPUT);
   pinMode(RELAY_PIN, OUTPUT);
 
+  /* Cấu hình ngắt nhận và truyền của LoRa */
   LoRa.onReceive(onReceive);
   LoRa.onTxDone(onTxDone);
   LoRa_rxMode();
 
+  /* Lấy lại trạng thái cũ trước khi bị mất điện */
   Node_RetrieveOldState();
 
-  /* Enable watchdog timer - Avoid halt*/
+  /* Khởi tạo watchdog - Chống treo chip */
   wdt_enable(WDTO_8S);
   send_info_to_gw_freq = millis();
 }
@@ -422,14 +430,13 @@ void loop()
   u32 now = millis();
   if (runEvery(1000))
   {
-    /* Blink Led */
+    /* Chớp led chân 6 - kiểm tra treo chip */
     digitalWrite(LED_DEBUG, !digitalRead(LED_DEBUG));
   }
 
-  /* Send this node information to GW every SEND_TO_GW_FREQ */
+  /* Định kỳ gửi dữ liệu node lên GW nếu không ở trong trạng thái check đèn 30s */
   if (now - send_info_to_gw_freq > SEND_TO_GW_FREQ)
   {
-    /* Update new info to GW periodicly if not in relay check phase */
     if (relay_check_flag == FALSE)
     {
       LoRa_sendMessage(Node_GenerateInfoMsg(this_node_ptr));
@@ -437,40 +444,40 @@ void loop()
     send_info_to_gw_freq = millis();
   }
 
-  /* Check if relay work properly in 30s */
+  /* Trình tự check đèn trong 30s nếu: chưa hết 30s + cờ check = TRUE */
   if ((millis() - receive_control_timestamp <= RELAY_CHECK_PERIOD) && (relay_check_flag == TRUE))
   {
-
-    /* Read light sensor */
+    /* Đọc cảm biến ảnh sáng */
     light_sensor_value = analogRead(LIGHT_SENSOR_PIN);
-    print_debug(DEBUG_RELAY, "Target state: %ld - Sensor value: %ld\r\n", control_type, light_sensor_value);
+    print_debug(DEBUG_RELAY, "Target state: %ld - Sensor value: %ld\r\n", target_state, light_sensor_value);
 
-    if (control_type == RELAY_ON)
+    /* Nếu trạng thái mục tiêu là bật đèn :1*/
+    if (target_state == RELAY_ON)
     {
-      /* Work properly */
+      /* Nếu giá trị cb quang đạt sáng */
       if (light_sensor_value < LIGHT_SENSOR_THRESHOLD)
       {
-        /* check done, led is on properly, assign relative value to node struct */
         this_node_ptr->_relayState = e_relayOn;
-        /* Clear check flag -> Check done */
+        /* Xóa cờ check */
         relay_check_flag = FALSE;
-        control_type = UNUSED;
+        target_state = UNUSED;
       }
     }
 
-    else if (control_type == RELAY_OFF)
+    /* Nếu trạng thái mục tiêu là tắt đèn :2 */
+    else if (target_state == RELAY_OFF)
     {
       if (light_sensor_value >= LIGHT_SENSOR_THRESHOLD)
       {
-        /* check done, led is off properly, assign relative value to node struct */
+        /* Nếu giá trị cb quang đạt tối */
         this_node_ptr->_relayState = e_relayOff;
-        /* Clear check flag -> Check done */
+        /* Xóa cờ check */
         relay_check_flag = FALSE;
-        control_type = UNUSED;
+        target_state = UNUSED;
       }
     }
 
-    /* If check phase is done */
+    /* Trong 30s mà check đèn thành công tức là đạt trạng thái mục tiêu -> Xóa cờ, gửi bản tin trạng thái lên GW */
     if (relay_check_flag == FALSE)
     {
       LoRa_sendMessage(Node_GenerateInfoMsg(this_node_ptr));
@@ -478,18 +485,20 @@ void loop()
     }
   }
 
+  /* Nếu hết 30s mà check đèn không thành công và cờ check = TRUE */
   else if ((millis() - receive_control_timestamp > RELAY_CHECK_PERIOD) && (relay_check_flag == TRUE))
   {
-    if (control_type == RELAY_ON)
+    if (target_state == RELAY_ON)
     {
       this_node_ptr->_relayState = e_relayFailedToOn;
     }
-    else if (control_type == RELAY_OFF)
+    else if (target_state == RELAY_OFF)
     {
       this_node_ptr->_relayState = e_relayFailedToOff;
     }
-    print_debug(DEBUG_RELAY, "[Error] Relay failed: %ld\r\n", control_type);
-    control_type = UNUSED;
+    print_debug(DEBUG_RELAY, "[Error] Relay failed: %ld\r\n", target_state);
+    target_state = UNUSED;
+    /* Xóa cờ check */
     relay_check_flag = FALSE;
   }
 
