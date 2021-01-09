@@ -1,0 +1,4 @@
+{
+    "board": "arduino:avr:uno",
+    "sketch": "ArduinoFullDuplex_328\\ArduinoFullDuplex_328.ino"
+}
